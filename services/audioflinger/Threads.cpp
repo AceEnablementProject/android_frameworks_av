@@ -1404,8 +1404,10 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
             track = TimedTrack::create(this, client, streamType, sampleRate, format,
                     channelMask, frameCount, sharedBuffer, sessionId, uid);
         }
+
         if (track == 0 || track->getCblk() == NULL || track->name() < 0) {
             lStatus = NO_MEMORY;
+            // track must be cleared from the caller as the caller has the AF lock
             goto Exit;
         }
 
@@ -2003,7 +2005,7 @@ ssize_t AudioFlinger::PlaybackThread::threadLoop_write()
     // otherwise use the HAL / AudioStreamOut directly
     } else {
         // Direct output and offload threads
-        size_t offset = (mCurrentWriteLength - mBytesRemaining) / sizeof(int16_t);
+        size_t offset = (mCurrentWriteLength - mBytesRemaining);
         if (mUseAsyncWrite) {
             ALOGW_IF(mWriteAckSequence & 1, "threadLoop_write(): out of sequence write request");
             mWriteAckSequence += 2;
@@ -2014,7 +2016,7 @@ ssize_t AudioFlinger::PlaybackThread::threadLoop_write()
         // FIXME We should have an implementation of timestamps for direct output threads.
         // They are used e.g for multichannel PCM playback over HDMI.
         bytesWritten = mOutput->stream->write(mOutput->stream,
-                                                   mMixBuffer + offset, mBytesRemaining);
+                                                   (char *)mMixBuffer + offset, mBytesRemaining);
         if (mUseAsyncWrite &&
                 ((bytesWritten < 0) || (bytesWritten == (ssize_t)mBytesRemaining))) {
             // do not wait for async callback in case of error of full write
@@ -2285,6 +2287,10 @@ bool AudioFlinger::PlaybackThread::threadLoop()
     acquireWakeLock();
 
 #ifdef SRS_PROCESSING
+    String8 bt_param = String8("bluetooth_enabled=0");
+    //set this param so that SRS module does not
+    // chk for BT device while wired headset is conneted
+    POSTPRO_PATCH_PARAMS_SET(bt_param);
     if (mType == MIXER) {
         POSTPRO_PATCH_OUTPROC_PLAY_INIT(this, myName);
     } else if (mType == DUPLICATING) {
@@ -2469,7 +2475,7 @@ bool AudioFlinger::PlaybackThread::threadLoop()
             // sleepTime == 0 means we must write to audio hardware
             if (sleepTime == 0) {
 #ifdef SRS_PROCESSING
-                if (mType == MIXER) {
+                if (mType == MIXER && mMixerStatus == MIXER_TRACKS_READY) {
                     POSTPRO_PATCH_OUTPROC_PLAY_SAMPLES(this, mFormat, mMixBuffer, mixBufferSize, mSampleRate, mChannelCount);
                 } else if (mType == DUPLICATING) {
                     POSTPRO_PATCH_OUTPROC_DUPE_SAMPLES(this, mFormat, mMixBuffer, mixBufferSize, mSampleRate, mChannelCount);
@@ -3824,8 +3830,10 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::DirectOutputThread::prep
                 size_t audioHALFrames = (latency_l() * mSampleRate) / 1000;
                 size_t framesWritten = mBytesWritten / mFrameSize;
                 if (mStandby || !last ||
-                        track->presentationComplete(framesWritten, audioHALFrames) ||
-                        track->isTerminated()) {
+#ifdef QCOM_DIRECTTRACK
+                        track->isTerminated() ||
+#endif
+                        track->presentationComplete(framesWritten, audioHALFrames)) {
                     if (track->isStopped()) {
                         track->reset();
                     }
@@ -4048,8 +4056,8 @@ bool AudioFlinger::AsyncCallbackThread::threadLoop()
         {
             Mutex::Autolock _l(mLock);
             while (!((mWriteAckSequence & 1) ||
-                            (mDrainSequence & 1) ||
-                            exitPending())) {
+                     (mDrainSequence & 1) ||
+                     exitPending())) {
                 mWaitWorkCV.wait(mLock);
             }
 
